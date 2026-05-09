@@ -15,7 +15,7 @@ def get_local_ip():
 
 if __name__ == "__main__":
     local_ip = get_local_ip()
-    print(f"\n🚀 SkyShare is starting...")
+    print(f"\n🚀 KageDrop is starting...")
     print(f"🔗 Local Access: http://localhost:8000")
     print(f"📱 Network Access: http://{local_ip}:8000")
     print(f"💡 same wifi par run hoga lawde\n")

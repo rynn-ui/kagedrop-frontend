@@ -1,0 +1,140 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>KageDrop | Instant Local File Sharing</title>
+    <link rel="stylesheet" href="css/style.css">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    <link href="https://fonts.googleapis.com/css2?family=Chakra+Petch:ital,wght@0,300;0,400;0,500;0,600;0,700;1,300;1,400;1,500;1,600;1,700&family=Ma+Shan+Zheng&family=Orbitron:wght@400;500;600;700;800;900&display=swap" rel="stylesheet">
+    <link rel="stylesheet" type="text/css" href="https://cdn.jsdelivr.net/npm/toastify-js/src/toastify.min.css">
+</head>
+<body>
+    <video autoplay muted loop id="bg-video">
+        <source src="assets/background.mp4" type="video/mp4">
+    </video>
+
+    <!-- Cinematic HUD Tooltip -->
+    <div id="hud-tooltip" class="hud-tooltip">
+        <div class="hud-content">
+            <div class="hud-scanline"></div>
+            <div class="hud-aura"></div>
+            <div class="hud-inner">
+                <div class="hud-avatar-frame">
+                    <img id="hud-avatar" src="" alt="">
+                    <div class="hud-glitch-layer"></div>
+                </div>
+                <div class="hud-info">
+                    <div class="hud-tag">TARGET ACQUIRED</div>
+                    <h2 id="hud-name">CHARACTER NAME</h2>
+                    <div class="hud-status">
+                        <span class="status-pulse"></span>
+                        READY TO TRANSFER
+                    </div>
+                </div>
+                <div class="hud-kanji">領域展開</div>
+            </div>
+        </div>
+    </div>
+
+    <main class="app-container">
+        <header>
+            <div class="logo">
+                <img src="assets/kunai_final.png" alt="KageDrop" class="brand-logo">
+                <h1>KageDrop</h1>
+            </div>
+            <div class="header-actions">
+                <button id="inbox-btn" title="Received Files"><i class="fas fa-inbox"></i><span id="inbox-badge" class="badge">0</span></button>
+                <button id="qr-btn" title="Show QR Code"><i class="fas fa-qrcode"></i></button>
+                <button id="theme-btn" title="Toggle Theme"><i class="fas fa-moon"></i></button>
+            </div>
+        </header>
+
+        <section class="discovery-area">
+            <div id="device-grid" class="device-grid">
+                <div class="searching-loader">
+                    <div class="ripple"></div>
+                    <p>Looking for devices...</p>
+                </div>
+            </div>
+        </section>
+
+        <footer>
+            <div class="footer-actions">
+                <button id="batch-upload-btn" class="btn-primary">
+                    <i class="fas fa-folder-plus"></i> Upload Batch Files
+                </button>
+            </div>
+            <p class="status-msg"><span id="my-info-display"></span> Open KageDrop on other devices to send files</p>
+        </footer>
+    </main>
+
+    <!-- QR Modal -->
+    <div id="qr-modal" class="modal">
+        <div class="modal-content glass">
+            <span class="close">&times;</span>
+            <h3>Scan to Connect</h3>
+            <div id="qrcode"></div>
+            <p>Scan this to open KageDrop on another device</p>
+            <button id="copy-link" class="btn-secondary">Copy Link</button>
+        </div>
+    </div>
+
+    <!-- Transfer Overlay -->
+    <div id="transfer-overlay" class="overlay">
+        <div class="transfer-card glass">
+            <div class="transfer-icon">
+                <i id="transfer-icon-el" class="fas fa-lock animate-pulse-icon"></i>
+            </div>
+            <h3 id="transfer-status">Sending File...</h3>
+            <p id="transfer-filename" style="color:var(--text-dim); font-size:0.85rem; margin-bottom:0.5rem;"></p>
+            <p id="crypto-status" class="crypto-status-line"></p>
+            <div class="progress-container">
+                <div id="progress-bar" class="progress-bar"></div>
+            </div>
+            <div class="transfer-stats">
+                <span id="transfer-progress">0%</span>
+                <span id="transfer-speed">0 KB/s</span>
+            </div>
+            <button id="cancel-transfer" class="btn-danger">Cancel</button>
+        </div>
+    </div>
+
+    <!-- Inbox Modal -->
+    <div id="inbox-modal" class="modal">
+        <div class="modal-content glass">
+            <span class="close-inbox">&times;</span>
+            <h3>Received Files</h3>
+            <div id="inbox-list" class="inbox-list">
+                <p class="empty-inbox">No files received yet</p>
+            </div>
+            <button id="clear-inbox" class="btn-danger" style="margin-top: 20px;">Clear All</button>
+        </div>
+    </div>
+
+    <!-- File Offer Modal -->
+    <div id="offer-modal" class="modal" style="display:none;">
+        <div class="modal-content glass" style="text-align:center; max-width:400px;">
+            <h3>📁 Incoming File</h3>
+            <p id="offer-sender" style="font-weight:600; margin: 10px 0;"></p>
+            <p id="offer-filename" style="color: var(--text-dim); margin-bottom: 20px;"></p>
+            <div style="display:flex; gap:12px; justify-content:center;">
+                <button id="offer-accept" class="btn-secondary" style="flex:1; padding:10px;">Accept</button>
+                <button id="offer-decline" class="btn-danger" style="flex:1; padding:10px;">Decline</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Hidden Inputs -->
+    <input type="file" id="file-input" style="display: none;" multiple>
+    <input type="file" id="folder-input" style="display: none;" webkitdirectory directory multiple>
+
+    <!-- JSZip for folder → zip bundling -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"></script>
+    <script type="text/javascript" src="https://cdn.jsdelivr.net/npm/toastify-js"></script>
+    <script src="js/socket.js"></script>
+    <script src="js/transfer.js"></script>
+    <script src="js/app.js"></script>
+</body>
+</html>

@@ -83,7 +83,7 @@ document.addEventListener('DOMContentLoaded', () => {
     socketManager.onDeviceListUpdate = (devices, myInfo) => {
         updateDeviceGrid(devices);
         if (myInfo) {
-            document.getElementById('my-info-display').innerHTML = `You are <strong>${myInfo.name}</strong>.`;
+            document.getElementById('my-info-display').innerHTML = `You are <strong>${myInfo.name}</strong> <span style="color:var(--text-dim); font-size:0.8em;">#${myInfo.id.substring(0,4)}</span>.`;
             document.title = `KageDrop | ${myInfo.name}`;
         }
     };

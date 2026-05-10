@@ -8,24 +8,23 @@ class SocketManager {
         this.onSignal = null;
         this.myInfo = null;
 
-        // ✅ REPLACE the workers.dev URL below with your actual Cloudflare Worker URL after deploying
         this.SIGNALING_SERVER = window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1'
             ? `ws://${window.location.host}/ws/${this.clientId}`
             : `wss://kagedrop-signaling.kagedrop.workers.dev/ws/${this.clientId}`;
     }
 
+    // ✅ Every tab/device gets a fully unique ID - no shared base
     getOrCreateClientId() {
-        let baseId = sessionStorage.getItem('skyshare_base_id');
-        if (!baseId) {
-            baseId = Math.random().toString(36).substring(2, 8);
-            sessionStorage.setItem('skyshare_base_id', baseId);
+        let id = sessionStorage.getItem('skyshare_client_id');
+        if (!id) {
+            id = Math.random().toString(36).substring(2, 10)
+               + Math.random().toString(36).substring(2, 10);
+            sessionStorage.setItem('skyshare_client_id', id);
         }
-        const tabId = Math.random().toString(36).substring(2, 6);
-        return `${baseId}-${tabId}`;
+        return id;
     }
 
     connect() {
-        console.log('Connecting to signaling server:', this.SIGNALING_SERVER);
         this.socket = new WebSocket(this.SIGNALING_SERVER);
 
         this.socket.onopen = () => {
@@ -57,10 +56,10 @@ class SocketManager {
             "Gon Freecss", "Yuji Itadori", "Sasuke Uchiha", "Light Yagami"
         ];
 
-        const baseId = this.clientId.split('-')[0];
+        // ✅ Hash the full unique clientId so every device gets a different character
         let hash = 0;
-        for (let i = 0; i < baseId.length; i++) {
-            hash = baseId.charCodeAt(i) + ((hash << 5) - hash);
+        for (let i = 0; i < this.clientId.length; i++) {
+            hash = this.clientId.charCodeAt(i) + ((hash << 5) - hash);
         }
         const index = Math.abs(hash) % characters.length;
         const charName = characters[index];
@@ -89,24 +88,19 @@ class SocketManager {
     handleMessage(data) {
         switch (data.type) {
             case 'device_list': {
-                // ✅ Filter yourself out using your_id sent by server
+                // ✅ Use your_id from server to correctly filter yourself out
                 const otherDevices = data.devices.filter(d => d.id !== data.your_id);
                 this.myInfo = data.devices.find(d => d.id === data.your_id);
                 if (this.onDeviceListUpdate) this.onDeviceListUpdate(otherDevices, this.myInfo);
                 break;
             }
-
             case 'file_offer':
-                // ✅ server sends from_id and from_identity (not "from")
                 if (this.onFileOffer) this.onFileOffer(data);
                 break;
-
             case 'transfer_accepted':
                 if (this.onTransferAccepted) this.onTransferAccepted(data);
                 break;
-
             case 'webrtc_signal':
-                // ✅ server sends from_id (not "from")
                 if (this.onSignal) this.onSignal(data);
                 break;
         }

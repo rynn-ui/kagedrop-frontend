@@ -7,7 +7,7 @@ class TransferManager {
         this.onFileReady = null;
         this.onCryptoStatus = null;
         
-        this.CHUNK_SIZE = 16384; // 16KB chunks for max compatibility
+        this.CHUNK_SIZE = 65536; // 16KB chunks for max compatibility
     }
 
     // --- Crypto Utilities (Stays the same) ---
@@ -202,8 +202,8 @@ class TransferManager {
                 const chunk = value.slice(i, i + this.CHUNK_SIZE);
                 
                 // Handle backpressure
-                while (channel.bufferedAmount > channel.bufferedAmountLowThreshold) {
-                    await new Promise(r => setTimeout(r, 20));
+                while (channel.bufferedAmount > 1024 * 1024) { // wait only if buffer > 1MB
+                    await new Promise(r => setTimeout(r, 10));
                 }
                 
                 channel.send(chunk);

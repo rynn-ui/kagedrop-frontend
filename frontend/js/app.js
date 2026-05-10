@@ -88,6 +88,10 @@ document.addEventListener('DOMContentLoaded', () => {
         }
     };
 
+    socketManager.onSignal = (data) => {
+        transferManager.handleSignal(data.from_id, data.signal);
+    };
+
     // Offer flow
     socketManager.onFileOffer = (data) => {
         offerQueue.push(data);
@@ -98,9 +102,9 @@ document.addEventListener('DOMContentLoaded', () => {
         if (offerQueue.length === 0) { offerActive = false; return; }
         offerActive = true;
         const data = offerQueue.shift();
-        const { from, file_info, transfer_id, encryption_key } = data;
+        const { from_id, from_identity, file_info, transfer_id, encryption_key } = data;
 
-        offerSender.textContent = `${from.name} wants to send you a file`;
+        offerSender.textContent = `${from_identity.name} wants to send you a file`;
         offerFilename.textContent = `"${file_info.name}" (${transferManager.formatSize(file_info.size)})`;
         offerModal.style.display = 'flex';
 
@@ -114,8 +118,8 @@ document.addEventListener('DOMContentLoaded', () => {
             document.title = originalTitle;
             offerModal.style.display = 'none';
             if (encryption_key) encryptionKeys[transfer_id] = encryption_key;
-            showToast(`Accepting from ${from.name}...`);
-            socketManager.acceptTransfer(from.id, transfer_id);
+            showToast(`Accepting from ${from_identity.name}...`);
+            socketManager.acceptTransfer(from_id, transfer_id);
             showTransferOverlay('Receiving File...', file_info.name, 'receive');
             processNextOffer();
         };
@@ -124,29 +128,27 @@ document.addEventListener('DOMContentLoaded', () => {
             clearInterval(flash);
             document.title = originalTitle;
             offerModal.style.display = 'none';
-            showToast(`Declined from ${from.name}`);
+            showToast(`Declined from ${from_identity.name}`);
             processNextOffer();
         };
     }
 
     socketManager.onTransferAccepted = async (data) => {
-        const { transfer_id } = data;
+        const { transfer_id, target_id } = data;
         const transfer = pendingFiles[transfer_id];
         if (!transfer) return;
 
-        const { file, targetId } = transfer;
+        const { file } = transfer;
         const key = encryptionKeys[transfer_id];
 
         showTransferOverlay('Sending File...', file.name, 'send');
 
         try {
-            await transferManager.uploadFile(file, targetId, transfer_id, key,
-                (progress, speed) => updateProgress(progress, speed),
-                (phase) => setCryptoStatus(phase)
-            );
+            await transferManager.sendFile(file, target_id, transfer_id, key);
             hideTransferOverlay();
             showToast(`Sent: ${file.name}`, 'success');
         } catch (err) {
+            console.error('P2P Transfer Error:', err);
             hideTransferOverlay();
             showToast(`Failed: ${file.name}`, 'error');
         }
@@ -155,27 +157,33 @@ document.addEventListener('DOMContentLoaded', () => {
         delete encryptionKeys[transfer_id];
     };
 
-    socketManager.onFileReady = async (data) => {
-        const { file_url, filename, transfer_id } = data;
+    // Set up transfer manager callbacks
+    transferManager.onProgress = (progress, speed) => updateProgress(progress, speed);
+    transferManager.onCryptoStatus = (phase) => setCryptoStatus(phase);
+    transferManager.onFileReady = async (transferId, blob, fileInfo) => {
+        const key = encryptionKeys[transferId];
         updateProgress(100, 0);
-        const key = encryptionKeys[transfer_id];
 
-        setCryptoStatus('decrypting');
-
-        const newFile = { id: transfer_id, name: filename, url: file_url, key, time: new Date().toLocaleTimeString() };
+        const newFile = { 
+            id: transferId, 
+            name: fileInfo.name, 
+            blob: blob, // Store blob directly in memory (for this session)
+            key, 
+            time: new Date().toLocaleTimeString() 
+        };
+        
         inboxFiles.unshift(newFile);
-        localStorage.setItem('skyshare_inbox', JSON.stringify(inboxFiles));
+        // We can't easily store large blobs in localStorage, 
+        // but for a P2P session this is fine.
         updateInboxUI();
 
         showToast(
-            `Received: ${filename} <button onclick="window.downloadFromInbox('${transfer_id}')" style="margin-left:10px;padding:2px 8px;font-size:12px;background:white;color:black;border:none;border-radius:4px;cursor:pointer;">Download</button>`,
+            `Received: ${fileInfo.name} <button onclick="window.downloadFromInbox('${transferId}')" style="margin-left:10px;padding:2px 8px;font-size:12px;background:white;color:black;border:none;border-radius:4px;cursor:pointer;">Download</button>`,
             'success', true
         );
 
         try {
-            await transferManager.downloadFile(file_url, filename, key,
-                (phase) => setCryptoStatus(phase)
-            );
+            await transferManager.downloadFile(blob, fileInfo.name, key);
         } catch (err) {
             console.error('Auto-download failed:', err);
         }
@@ -188,7 +196,8 @@ document.addEventListener('DOMContentLoaded', () => {
         cryptoStatusEl.className = 'crypto-status-line ' + phase;
         const messages = {
             encrypting: '🔐 Encrypting with AES-256-GCM...',
-            uploading:  '📤 Uploading encrypted data...',
+            uploading:  '📤 Sending data P2P...',
+            receiving:  '📥 Receiving data P2P...',
             decrypting: '🔓 Decrypting received data...',
             done:       '✅ Transfer complete'
         };
@@ -271,7 +280,10 @@ document.addEventListener('DOMContentLoaded', () => {
     // UI helpers
     window.downloadFromInbox = (id) => {
         const file = inboxFiles.find(f => f.id === id);
-        if (file) transferManager.downloadFile(file.url, file.name, file.key, () => {});
+        if (file) {
+            // file.blob is the received data
+            transferManager.downloadFile(file.blob, file.name, file.key);
+        }
     };
 
     function updateInboxUI() {

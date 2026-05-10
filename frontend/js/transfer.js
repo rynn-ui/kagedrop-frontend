@@ -1,13 +1,19 @@
 class TransferManager {
     constructor() {
-        this.currentTransfer = null;
+        this.peerConnections = {}; // targetId -> RTCPeerConnection
+        this.dataChannels = {};    // targetId -> RTCDataChannel
+        this.receivers = {};       // transferId -> { chunks, receivedSize, fileInfo }
+        this.onProgress = null;
+        this.onFileReady = null;
+        this.onCryptoStatus = null;
+        
+        this.CHUNK_SIZE = 16384; // 16KB chunks for max compatibility
     }
 
+    // --- Crypto Utilities (Stays the same) ---
     async generateKey() {
         const key = await window.crypto.subtle.generateKey(
-            { name: "AES-GCM", length: 256 },
-            true,
-            ["encrypt", "decrypt"]
+            { name: "AES-GCM", length: 256 }, true, ["encrypt", "decrypt"]
         );
         const exported = await window.crypto.subtle.exportKey("raw", key);
         return btoa(String.fromCharCode(...new Uint8Array(exported)));
@@ -44,99 +50,188 @@ class TransferManager {
         return new Blob([decrypted]);
     }
 
-    // ✅ Zip a folder (FileList from webkitdirectory) into a single Blob
     async zipFolder(files) {
         const zip = new JSZip();
-        // files[0].webkitRelativePath = "FolderName/sub/file.txt"
-        // Use the top-level folder name as the zip name
         const folderName = files[0].webkitRelativePath.split('/')[0];
         for (const file of files) {
             const relativePath = file.webkitRelativePath;
             const content = await file.arrayBuffer();
             zip.file(relativePath, content);
         }
-        const blob = await zip.generateAsync({
-            type: 'blob',
-            compression: 'DEFLATE',
-            compressionOptions: { level: 6 }
-        });
+        const blob = await zip.generateAsync({ type: 'blob', compression: 'DEFLATE' });
         return { blob, folderName: folderName + '.zip' };
     }
 
-    async uploadFile(file, targetId, transferId, keyB64, onProgress, onCryptoStatus) {
-        let uploadBlob = file;
+    // --- WebRTC Logic ---
 
-        if (keyB64) {
-            if (onCryptoStatus) onCryptoStatus('encrypting');
-            uploadBlob = await this.encryptFile(file, keyB64);
+    async getPeerConnection(targetId) {
+        if (this.peerConnections[targetId]) return this.peerConnections[targetId];
+
+        const pc = new RTCPeerConnection({
+            iceServers: [{ urls: 'stun:stun.l.google.com:19302' }]
+        });
+
+        pc.onicecandidate = (event) => {
+            if (event.candidate) {
+                socketManager.sendSignal(targetId, { type: 'ice-candidate', candidate: event.candidate });
+            }
+        };
+
+        pc.ondatachannel = (event) => {
+            this.setupDataChannel(targetId, event.channel);
+        };
+
+        this.peerConnections[targetId] = pc;
+        return pc;
+    }
+
+    setupDataChannel(targetId, channel) {
+        channel.binaryType = 'arraybuffer';
+        
+        channel.onopen = () => console.log(`DataChannel open with ${targetId}`);
+        channel.onclose = () => {
+            console.log(`DataChannel closed with ${targetId}`);
+            delete this.dataChannels[targetId];
+        };
+
+        channel.onmessage = (event) => {
+            this.handleDataMessage(targetId, event.data);
+        };
+
+        this.dataChannels[targetId] = channel;
+    }
+
+    async handleDataMessage(targetId, data) {
+        if (typeof data === 'string') {
+            const msg = JSON.parse(data);
+            if (msg.type === 'file_start') {
+                this.receivers[msg.transferId] = {
+                    chunks: [],
+                    receivedSize: 0,
+                    fileInfo: msg.fileInfo,
+                    startTime: Date.now()
+                };
+                if (this.onCryptoStatus) this.onCryptoStatus('receiving');
+            } else if (msg.type === 'file_end') {
+                const receiver = this.receivers[msg.transferId];
+                const blob = new Blob(receiver.chunks);
+                if (this.onFileReady) this.onFileReady(msg.transferId, blob, receiver.fileInfo);
+                delete this.receivers[msg.transferId];
+            }
+        } else {
+            // Binary chunk
+            // The first few bytes of binary data might need to identify the transfer
+            // But for simplicity in 1-on-1 transfers, we can assume the active one
+            const transferId = Object.keys(this.receivers)[0]; 
+            if (transferId) {
+                const receiver = this.receivers[transferId];
+                receiver.chunks.push(data);
+                receiver.receivedSize += data.byteLength;
+                
+                const percent = (receiver.receivedSize / receiver.fileInfo.size) * 100;
+                const speed = receiver.receivedSize / ((Date.now() - receiver.startTime) / 1000);
+                if (this.onProgress) this.onProgress(percent, speed);
+            }
         }
+    }
 
-        if (onCryptoStatus) onCryptoStatus('uploading');
+    async handleSignal(fromId, signal) {
+        const pc = await this.getPeerConnection(fromId);
 
-        const formData = new FormData();
-        formData.append('file', uploadBlob, file.name);
-        formData.append('target_id', targetId);
-        formData.append('transfer_id', transferId);
+        if (signal.type === 'offer') {
+            await pc.setRemoteDescription(new RTCSessionDescription(signal.sdp));
+            const answer = await pc.createAnswer();
+            await pc.setLocalDescription(answer);
+            socketManager.sendSignal(fromId, { type: 'answer', sdp: answer });
+        } else if (signal.type === 'answer') {
+            await pc.setRemoteDescription(new RTCSessionDescription(signal.sdp));
+        } else if (signal.type === 'ice-candidate') {
+            await pc.addIceCandidate(new RTCIceCandidate(signal.candidate));
+        }
+    }
 
-        return new Promise((resolve, reject) => {
-            const xhr = new XMLHttpRequest();
-            this.currentTransfer = xhr;
-            const startTime = Date.now(); // ✅ fixed position
+    async initiateTransfer(targetId) {
+        const pc = await this.getPeerConnection(targetId);
+        const channel = pc.createDataChannel('fileTransfer', { ordered: true });
+        this.setupDataChannel(targetId, channel);
 
-            xhr.open('POST', '/upload', true);
-
-            xhr.upload.onprogress = (e) => {
-                if (e.lengthComputable) {
-                    const percentComplete = (e.loaded / e.total) * 100;
-                    const speed = e.loaded / ((Date.now() - startTime) / 1000);
-                    onProgress(percentComplete, speed);
+        const offer = await pc.createOffer();
+        await pc.setLocalDescription(offer);
+        socketManager.sendSignal(targetId, { type: 'offer', sdp: offer });
+        
+        return new Promise((resolve) => {
+            const check = setInterval(() => {
+                if (this.dataChannels[targetId] && this.dataChannels[targetId].readyState === 'open') {
+                    clearInterval(check);
+                    resolve();
                 }
-            };
-
-            xhr.onload = () => {
-                if (xhr.status === 200) {
-                    resolve(JSON.parse(xhr.responseText));
-                } else {
-                    reject(new Error('Upload failed'));
-                }
-                this.currentTransfer = null;
-            };
-
-            xhr.onerror = () => {
-                reject(new Error('Network error'));
-                this.currentTransfer = null;
-            };
-
-            xhr.send(formData);
+            }, 100);
         });
     }
 
-    async downloadFile(url, filename, keyB64, onCryptoStatus) {
-        const response = await fetch(url);
-        let blob = await response.blob();
-
+    async sendFile(file, targetId, transferId, keyB64) {
+        let uploadBlob = file;
         if (keyB64) {
-            if (onCryptoStatus) onCryptoStatus('decrypting');
-            blob = await this.decryptFile(blob, keyB64);
+            if (this.onCryptoStatus) this.onCryptoStatus('encrypting');
+            uploadBlob = await this.encryptFile(file, keyB64);
         }
 
-        if (onCryptoStatus) onCryptoStatus('done');
+        if (!this.dataChannels[targetId]) {
+            await this.initiateTransfer(targetId);
+        }
 
-        const downloadUrl = window.URL.createObjectURL(blob);
-        const a = document.createElement('a');
-        a.href = downloadUrl;
-        a.download = filename;
-        document.body.appendChild(a);
-        a.click();
-        window.URL.revokeObjectURL(downloadUrl);
-        document.body.removeChild(a);
+        const channel = this.dataChannels[targetId];
+        channel.send(JSON.stringify({
+            type: 'file_start',
+            transferId,
+            fileInfo: { name: file.name, size: uploadBlob.size }
+        }));
+
+        if (this.onCryptoStatus) this.onCryptoStatus('uploading');
+        
+        const reader = uploadBlob.stream().getReader();
+        let offset = 0;
+        const startTime = Date.now();
+
+        while (true) {
+            const { done, value } = await reader.read();
+            if (done) break;
+
+            // Split value into CHUNK_SIZE chunks
+            for (let i = 0; i < value.length; i += this.CHUNK_SIZE) {
+                const chunk = value.slice(i, i + this.CHUNK_SIZE);
+                
+                // Handle backpressure
+                while (channel.bufferedAmount > channel.bufferedAmountLowThreshold) {
+                    await new Promise(r => setTimeout(r, 20));
+                }
+                
+                channel.send(chunk);
+                offset += chunk.byteLength;
+                
+                const percent = (offset / uploadBlob.size) * 100;
+                const speed = offset / ((Date.now() - startTime) / 1000);
+                if (this.onProgress) this.onProgress(percent, speed);
+            }
+        }
+
+        channel.send(JSON.stringify({ type: 'file_end', transferId }));
     }
 
-    cancelTransfer() {
-        if (this.currentTransfer) {
-            this.currentTransfer.abort();
-            this.currentTransfer = null;
+    async downloadFile(blob, filename, keyB64) {
+        let finalBlob = blob;
+        if (keyB64) {
+            if (this.onCryptoStatus) this.onCryptoStatus('decrypting');
+            finalBlob = await this.decryptFile(blob, keyB64);
         }
+
+        if (this.onCryptoStatus) this.onCryptoStatus('done');
+        const url = URL.createObjectURL(finalBlob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = filename;
+        a.click();
+        URL.revokeObjectURL(url);
     }
 
     formatSize(bytes) {
